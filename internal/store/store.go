@@ -31,7 +31,7 @@ func (s *Store) ExecTx(ctx context.Context, fn func(q *db.Queries) error) error 
 	// Rollback is a safe no-op if Commit succeeds
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	qtx := s.Queries.WithTx(tx)
+	qtx := s.WithTx(tx)
 	if err := fn(qtx); err != nil {
 		return err
 	}
