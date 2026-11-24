@@ -1,0 +1,414 @@
+openapi: 3.0.3
+info:
+  title: SplitFlow API
+  version: 1.0.0
+  description: Collaborative expense & bill-splitting backend built with Go, chi, PostgreSQL, and sqlc.
+
+servers:
+  - url: /api/v1
+    description: Local development server
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    AuthTokensResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+          example: 900
+
+    Group:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    Expense:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        group_id:
+          type: string
+          format: uuid
+        paid_by:
+          type: string
+          format: uuid
+        description:
+          type: string
+        amount:
+          type: integer
+          format: int64
+          description: Amount in smallest currency unit (e.g., 5000 = $50.00)
+        currency:
+          type: string
+          example: USD
+        created_at:
+          type: string
+          format: date-time
+
+    Balance:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+        net_balance_cents:
+          type: integer
+          format: int64
+
+    Transfer:
+      type: object
+      properties:
+        from_user_id:
+          type: string
+          format: uuid
+        from_name:
+          type: string
+        to_user_id:
+          type: string
+          format: uuid
+        to_name:
+          type: string
+        amount:
+          type: integer
+          format: int64
+
+paths:
+  /auth/register:
+    post:
+      summary: Register a new user
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, name, password]
+              properties:
+                email: { type: string, format: email }
+                name: { type: string }
+                password: { type: string, minLength: 8 }
+      responses:
+        "201":
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "409":
+          description: Email already registered
+        "429":
+          description: Rate limit exceeded
+
+  /auth/login:
+    post:
+      summary: Authenticate and receive access + rotating refresh tokens
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokensResponse"
+        "401":
+          description: Invalid credentials
+        "429":
+          description: Rate limit exceeded
+
+  /auth/refresh:
+    post:
+      summary: Rotate refresh token and issue a new token pair
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: Token pair rotated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokensResponse"
+        "401":
+          description: Invalid, expired, or revoked refresh token
+
+  /auth/logout:
+    post:
+      summary: Revoke a refresh token
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "204":
+          description: Logged out
+
+  /groups:
+    post:
+      summary: Create a group and add caller as member (transactional)
+      tags: [Groups]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "201":
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+    get:
+      summary: List groups the authenticated user belongs to
+      tags: [Groups]
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: List of groups
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Group"
+
+  /groups/{groupID}/members:
+    post:
+      summary: Add an existing user to a group by email
+      tags: [Groups]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: groupID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: Member added
+        "403":
+          description: Caller is not a member
+        "404":
+          description: Target user not found
+
+  /groups/{groupID}/expenses:
+    post:
+      summary: Create an expense and split evenly among group members
+      tags: [Expenses]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: groupID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Client-generated UUID to safely retry requests without duplicates
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [description, amount]
+              properties:
+                description: { type: string }
+                amount: { type: integer, format: int64, minimum: 1 }
+                currency: { type: string, default: USD }
+      responses:
+        "201":
+          description: Expense created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Expense"
+        "200":
+          description: Idempotent replay (original expense returned)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Expense"
+    get:
+      summary: List group expenses with cursor-based pagination
+      tags: [Expenses]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: groupID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Paginated expenses
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Expense"
+                  next_cursor:
+                    type: string
+                  has_more:
+                    type: boolean
+
+  /groups/{groupID}/balances:
+    get:
+      summary: Compute ledger-based net balances for all group members
+      tags: [Balances]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: groupID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Member net balances
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Balance"
+
+  /groups/{groupID}/settlements:
+    post:
+      summary: Record a settlement payment from caller to another group member
+      tags: [Settlements]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: groupID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_user_id, amount]
+              properties:
+                to_user_id: { type: string, format: uuid }
+                amount: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "201":
+          description: Settlement recorded
+
+  /groups/{groupID}/settlements/plan:
+    get:
+      summary: Get minimal simplified transfers needed to settle all group debts
+      tags: [Settlements]
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - name: groupID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Simplified transfer plan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transfers:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Transfer"

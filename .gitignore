@@ -1,0 +1,47 @@
+# Go binaries, build artifacts, and test outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.txt
+coverage.html
+/bin/
+/dist/
+/tmp/
+splitflow-api
+
+# Go workspace files (local multi-module overrides)
+go.work
+go.work.sum
+
+# Environment variables & local secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# GoLand / JetBrains IDEs
+# Ignoring the entire folder avoids Windows/macOS path conflicts
+.idea/
+*.iml
+
+# VS Code (just in case)
+.vscode/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+
+# Logs
+*.log
